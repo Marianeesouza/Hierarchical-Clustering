@@ -346,7 +346,7 @@ if(any(is.na(data_scaled) | is.infinite(data_scaled))) {
 }
 
 # Clustering hierárquico com dados ponderados
-hc_completo <- hclust(dist(data_scaled), method = "ward.D2")
+hc_completo <- hclust(dist(data_scaled), method = "average")
 phylo_tree_completo <- as.phylo(hc_completo)
 
 # Garantir que os labels são os nomes dos Pokémon
