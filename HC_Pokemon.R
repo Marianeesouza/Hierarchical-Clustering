@@ -28,144 +28,6 @@ library(treeio)
 library(yaml)
 
 # ======================================
-# 🚀 SISTEMA DE PESOS AUTOMÁTICOS (CORRIGIDO)
-# ======================================
-
-calculate_dual_weights <- function(df) {
-  feature_sets <- list()
-  
-  # === 1️⃣ Identificar grupos de features ===
-  feature_sets$types <- names(df)[names(df) %in% c(
-    "Normal", "Fire", "Water", "Electric", "Grass", "Ice", 
-    "Fighting", "Poison", "Ground", "Flying", "Psychic", 
-    "Bug", "Rock", "Ghost", "Dragon", "Dark", "Steel", "Fairy"
-  )]
-  
-  feature_sets$abilities <- names(df)[sapply(names(df), function(x) {
-    x != "Name" && 
-      !x %in% feature_sets$types &&
-      grepl("^[A-Z][a-z]+$", x) # Assume que habilidades são capitalizadas
-  })]
-  
-  # NOVO: Move Features são as colunas MoveType_xxx
-  feature_sets$moves_types_avg <- names(df)[grepl("^MoveType_", names(df))] 
-  
-  # === 2️⃣ Função para calcular Fator de RARIDADE (Boost Apenas) ===
-  calculate_rarity_boost <- function(features, df) {
-    if(length(features) == 0) return(numeric(0))
-    
-    frequencies <- colSums(df[features] > 0, na.rm = TRUE)
-    total_pokemon <- nrow(df)
-    
-    # Raridade base: Inverso da frequência normalizado
-    rarity_base <- total_pokemon / frequencies
-    
-    # Média para normalização
-    mean_rarity <- mean(rarity_base)
-    
-    # Fator de Boost: Será 1.0 ou > 1.0. Aumenta o peso apenas se for mais raro que a média.
-    rarity_boost <- ifelse(
-      rarity_base > mean_rarity, 
-      # Aplica boost logarítmico (para não explodir o valor)
-      pmin(rarity_base / mean_rarity, 5.0), # Limita o boost máximo a 5x
-      1.0 # Sem boost para features na média ou mais comuns
-    )
-    
-    names(rarity_boost) <- features
-    return(rarity_boost)
-  }
-  
-  # Calcular Boosts para Habilidades e Tipos (se necessário)
-  rarity_boosts <- list(
-    types = calculate_rarity_boost(feature_sets$types, df),
-    abilities = calculate_rarity_boost(feature_sets$abilities, df),
-    moves_types_avg = calculate_rarity_boost(feature_sets$moves_types_avg, df)
-  )
-  
-  feature_sets_final <- list(
-    types = feature_sets$types,
-    abilities = feature_sets$abilities,
-    moves_types_avg = feature_sets$moves_types_avg
-  )
-  
-  return(list(feature_sets = feature_sets_final, rarity_boosts = rarity_boosts))
-}
-
-apply_custom_weights <- function(df, set_weights = NULL) {
-  # Definir sets de pesos se não fornecidos
-  if(is.null(set_weights)) {
-    set_weights <- list(types = 1.0, abilities = 1.0, moves_types_avg = 1.0, egg_steps = 1.0)
-  }
-  
-  weight_info <- calculate_dual_weights(df)
-  df_weighted <- df
-  
-  # Loop para aplicar pesos (Peso Base * Fator de Raridade)
-  for(set_name in names(set_weights)) {
-    
-    # 1. Tratar Egg.Steps manualmente (sem raridade)
-    if(set_name == "egg_steps" && "Egg.Steps" %in% names(df_weighted)) {
-      df_weighted$Egg.Steps <- df_weighted$Egg.Steps * set_weights[[set_name]]
-      next
-    }
-    
-    features <- weight_info$feature_sets[[set_name]]
-    
-    if(length(features) > 0) {
-      
-      # Peso Manual para o SET (ex: types=1.0, abilities=2.5)
-      manual_weight <- set_weights[[set_name]]
-      
-      for(feature in features) {
-        # Fator de raridade: 1.0 (comum) ou > 1.0 (raro)
-        rarity_factor <- weight_info$rarity_boosts[[set_name]][[feature]]
-        
-        # Peso final = Peso Manual * Fator de Raridade
-        final_weight <- manual_weight * rarity_factor
-        
-        # Aplica o peso final
-        df_weighted[[feature]] <- df_weighted[[feature]] * final_weight
-      }
-    }
-  }
-  
-  return(list(weighted_df = df_weighted, weight_info = weight_info, set_weights = set_weights))
-}
-
-print_weight_report <- function(weight_result) {
-  cat("=== RELATÓRIO DE PESOS ===\n")
-  weight_info <- weight_result$weight_info
-  set_weights <- weight_result$set_weights
-  
-  for(set_name in names(set_weights)) {
-    if(set_name == "egg_steps") {
-      cat(sprintf("\n%s (Peso: %.1f):\n", "EGG.STEPS (MANUAL)", set_weights[[set_name]]))
-      next
-    }
-    
-    cat(sprintf("\n%s (Peso Base: %.1f):\n", toupper(set_name), set_weights[[set_name]]))
-    features <- weight_info$feature_sets[[set_name]]
-    
-    if(length(features) > 0) {
-      # Selecionar os 5 mais raros (maior boost)
-      rarity_scores <- weight_info$rarity_boosts[[set_name]][features]
-      features_sorted <- features[order(rarity_scores, decreasing = TRUE)]
-      
-      for(feature in head(features_sorted, 5)) { 
-        rarity_factor <- weight_info$rarity_boosts[[set_name]][[feature]]
-        final_w <- set_weights[[set_name]] * rarity_factor
-        freq <- sum(weight_result$weighted_df[[feature]] > 0)
-        
-        # Nota: A frequência é count de Pokémon que a possuem (para raridade)
-        cat(sprintf("  %s: freq=%d, boost=%.2fx, final=%.2f\n", 
-                    feature, freq, rarity_factor, final_w))
-      }
-      if(length(features) > 5) cat(sprintf("  ... e mais %d features\n", length(features)-5))
-    }
-  }
-}
-
-# ======================================
 # 1️⃣ Carregar dados com verificação
 # ======================================
 if(!file.exists("pokedex.csv")) {
@@ -200,7 +62,8 @@ df_abilities <- df %>%
     names_from = Abilities,
     values_from = value,
     values_fill = 0
-  )
+  ) %>%
+  rename_with(~ paste0("Ability_", .x), -Name)
 
 # ======================================
 # 3️⃣ Codificação de Tipos
@@ -212,76 +75,52 @@ df_types <- df %>%
   filter(!is.na(Type)) %>%
   distinct(Name, Type) %>%
   mutate(value = 1) %>%
-  pivot_wider(names_from = Type, values_from = value, values_fill = 0)
+  pivot_wider(names_from = Type, values_from = value, values_fill = 0) %>%
+  rename_with(~ paste0("Type_", .x), -Name)
 
 # ======================================
 # 4️⃣ Codificação detalhada de moves (Média de Nível por Tipo de Move)
 # ======================================
 
-# Função de Parse Corrigida
-parse_moves_yaml <- function(x) {
+# Função de Parse
+parse_moves_name_yaml <- function(x) {
   if (is.na(x) || x == "" || x == "[]") {
-    return(tibble(Move_Name = NA, Move_Type = NA, Move_Level = 0))
+    return(tibble(Move_Name = character(0)))
   }
   x_clean <- str_replace_all(x, "None", "null")
   
   tryCatch({
-    moves_list <- read_yaml(text = x_clean)
+    moves_list <- yaml::yaml.load(x_clean)
+    if (length(moves_list) == 0) return(tibble(Move_Name = character(0)))
     
-    if (length(moves_list) == 0) {
-      return(tibble(Move_Name = NA, Move_Type = NA, Move_Level = 0))
-    }
+    # Extrai nomes das chaves
+    move_names <- names(moves_list)
+    if (is.null(move_names)) move_names <- unlist(moves_list)
     
-    moves_df <- bind_rows(moves_list) %>% 
-      mutate(Move_Name = names(moves_list), .before = 1) %>% 
-      select(Move_Name, Type, Level) %>%
-      rename(Move_Type = Type, Move_Level_Text = Level) %>%
-      
-      mutate(
-        Move_Level_Text = as.character(Move_Level_Text),
-        # CORREÇÃO: Usar 0 para moves não Level-Up (TM, Egg)
-        Move_Level = suppressWarnings(
-          ifelse(
-            Move_Level_Text %in% c("—", "--", "-", ""), 0, # 0 para TM/Egg Moves
-            ifelse(
-              is.na(as.numeric(Move_Level_Text)),
-              0, as.numeric(Move_Level_Text)
-            )
-          )
-        )
-      ) %>%
-      select(Move_Name, Move_Type, Move_Level)
-    
-    return(moves_df)
-  }, error = function(e) {
-    message(paste("Erro ao processar Moves. Detalhe:", e$message))
-    return(tibble(Move_Name = NA, Move_Type = NA, Move_Level = 0))
+    tibble(Move_Name = unique(move_names))
+  },
+  error = function(e) {
+    message(paste("⚠️ Erro ao processar Moves:", e$message))
+    return(tibble(Move_Name = character(0)))
   })
 }
 
-# Aplica e transforma
-df_moves_detailed <- df %>%
-  mutate(moves_parsed = lapply(Moves, parse_moves_yaml)) %>%
+# Aplica e transforma (Cria 1 coluna por Move, valor 1 se o Pokémon aprende)
+df_moves <- df %>%
+  mutate(moves_parsed = lapply(Moves, parse_moves_name_yaml)) %>%
   select(Name, moves_parsed) %>%
-  unnest(moves_parsed)
-
-# NOVO: Matriz de Média de Nível por Tipo de Move
-df_moves <- df_moves_detailed %>%
-  filter(!is.na(Move_Type) & Move_Level > 0) %>% # Apenas Level-Up Moves (Level > 0)
-  group_by(Name, Move_Type) %>%
-  # Calcula a média dos níveis para cada tipo de move
-  summarise(
-    avg_level = round(mean(Move_Level, na.rm = TRUE), 1),
-    .groups = 'drop'
-  ) %>%
-  # Cria a coluna com o nome 'MoveType_Tipo'
-  mutate(col_name = paste0("MoveType_", Move_Type)) %>%
-  select(Name, col_name, avg_level) %>%
+  unnest(moves_parsed) %>%
+  filter(!is.na(Move_Name) & Move_Name != "") %>%
+  
+  # Agregação final (Codificação Binária/One-Hot)
+  mutate(value = 1) %>%
   pivot_wider(
-    names_from = col_name,
-    values_from = avg_level,
+    names_from = Move_Name,
+    values_from = value,
     values_fill = 0
   )
+# Renomeia colunas para evitar conflito com nomes de Tipos/Habilidades
+names(df_moves) <- c("Name", paste0("Move_", names(df_moves)[-1]))
 
 
 # ======================================
@@ -291,7 +130,7 @@ df_final <- df %>%
   select(Name, Egg.Steps) %>% # Inclui EggSteps aqui
   left_join(df_types, by = "Name") %>%
   left_join(df_abilities, by = "Name") %>%
-  left_join(df_moves, by = "Name") # Moves: Média de Nível por Tipo
+  left_join(df_moves, by = "Name")
 
 # Substituir NAs por 0 apenas nas colunas numéricas
 numeric_cols <- sapply(df_final, is.numeric)
@@ -303,56 +142,54 @@ df_final <- df_final[, colSums(df_final[, -1], na.rm = TRUE) > 0 | colnames(df_f
 # Garante uma linha única por Pokémon
 df_final <- df_final %>% distinct(Name, .keep_all = TRUE)
 
+# ======================================
+# 🎯 FILTRAGEM, PESAGEM E CLUSTERING (SIMPLIFICADO)
+# ======================================
 
-# ======================================
-# 🎯 FILTRAGEM E CLUSTERING
-# ======================================
-# Usar n Pokémon (Ex: 1ª Geração)
 df_final_completo <- df_final %>% filter(!is.na(Name))
-
 cat("Utilizando", nrow(df_final_completo), "Pokémon para clustering.\n")
 
 # 🔧 CONFIGURAR SEUS PESOS AQUI (AJUSTE CONFORME SUA PREFERÊNCIA)
-# Peso Base: Valor numérico que a feature terá. A raridade só aumenta este valor.
+# PESO MANUAL: O valor multiplica a importância da feature na distância.
 my_weights <- list(
-  types = 4.0,               # Tipos: Peso Base. Raridade aumenta se for raro.
-  abilities = 2.5,           # Habilidades: Genética forte (alto peso). Raridade aumenta se for rara.
-  moves_types_avg = 2.0,     # Moves (Média de Nível por Tipo): Peso Base. Raridade aumenta se for raro.
-  egg_steps = 0.5            # Passos para Ovo: Peso manual, sem raridade.
+  abilities = 2.0,   # Habilidades (Traço Genético Forte)
+  moves = 2.5,       # Moves (Comportamento/Conjunto de Aprendizagem)
+  types = 1.0,       # Tipos (Base, peso neutro 1.0)
+  egg_steps = 0.5    # Passos para Ovo (Baixa importância)
 )
 
-cat("Aplicando sistema de pesos automáticos...\n")
+df_weighted <- df_final_completo
 
-# Aplicar pesos automáticos e transformação (Nível^2)
-weighted_result <- apply_custom_weights(df_final_completo, my_weights)
-df_weighted <- weighted_result$weighted_df
+# --- Habilidades ---
+ability_cols <- grep("^Ability_", names(df_weighted), value = TRUE)
+df_weighted[ability_cols] <- df_weighted[ability_cols] * my_weights$abilities
 
-# Mostrar relatório dos pesos
-print_weight_report(weighted_result)
+# --- Moves: apenas raros ---
+move_cols <- grep("^Move_", names(df_weighted), value = TRUE)
+move_means <- colMeans(df_weighted[, move_cols], na.rm = TRUE)
+rare_moves <- names(move_means[move_means <= 0.05])
+# Substituir todas as colunas de moves pelas raras
+df_weighted <- df_weighted[, c(setdiff(names(df_weighted), move_cols), rare_moves)]
+# Aplicar peso
+df_weighted[rare_moves] <- df_weighted[rare_moves] * my_weights$moves
 
-# Aplica peso manual para Egg.Steps (já embutido na apply_custom_weights, mas reconfirmação)
-# Nada mais precisa ser feito aqui, pois a função apply_custom_weights já cuida disso.
+# --- Tipos ---
+type_cols <- grep("^Type_", names(df_weighted), value = TRUE)
+df_weighted[type_cols] <- df_weighted[type_cols] * my_weights$types
 
-# ➡️ CORREÇÃO: Usar DADOS PONDERADOS para o clustering
-data_for_clustering <- df_weighted[, -1]
+# --- Egg.Steps ---
+df_weighted$Egg.Steps <- df_weighted$Egg.Steps * my_weights$egg_steps
 
-# Escalonar dados (MUITO IMPORTANTE!)
-data_scaled <- scale(data_for_clustering)
+# Escalonar tudo, exceto Name
+data_scaled <- scale(df_weighted[,-1])
 
-# Verificar e remover NAs/Infs resultantes do scale
-if(any(is.na(data_scaled) | is.infinite(data_scaled))) {
-  data_scaled[is.na(data_scaled) | is.infinite(data_scaled)] <- 0
-  warning("NAs ou valores infinitos encontrados após escalonamento. Substituídos por 0.")
-}
+# Substituir NAs ou Infs
+data_scaled[is.na(data_scaled) | is.infinite(data_scaled)] <- 0
 
-# Clustering hierárquico com dados ponderados
+# Clustering hierárquico
 hc_completo <- hclust(dist(data_scaled), method = "average")
 phylo_tree_completo <- as.phylo(hc_completo)
-
-# Garantir que os labels são os nomes dos Pokémon
-phylo_tree_completo$tip.label <- df_final_completo$Name
-
-cat("✅ Clustering com pesos aplicados concluído!\n")
+phylo_tree_completo$tip.label <- df_weighted$Name
 
 # ======================================
 # 📊 ANÁLISE DE CLUSTERS RESULTANTES
@@ -399,7 +236,7 @@ clusters <- analyze_clusters_with_types(hc_completo, df_final_completo, df_with_
 # 🎨 VISUALIZAÇÃO MELHORADA
 # ======================================
 
-n_visualizacao <- 386
+n_visualizacao <- 151
 
 # Função para plotar com cores de cluster (Método seguro com %<+%)
 plot_tree_colored_clusters <- function(phylo_tree, clusters, df_final, n_display) {
@@ -483,7 +320,7 @@ cat("\n📊 RESULTADOS OBTIDOS:\n")
 cat("• Total de Pokémon processados:", nrow(df_final_completo), "\n")
 cat("• Número de características (colunas):", ncol(df_final_completo) - 1, "\n")
 cat("• Número de clusters identificados:", length(unique(clusters)), "\n")
-cat("• Método de Clustering: Ward.D2 com Distância Euclidiana em dados escalonados\n")
+cat("• Método de Clustering: Average Linkage (UPGMA) com Distância Euclidiana em dados escalonados\n")
 
 cat("\n🔧 CONFIGURAÇÃO APLICADA (FATOR DE RARIDADE É APENAS BOOST > 1.0):\n")
 cat("• Moves: Média de Nível por Tipo de Move (Level-Up apenas)\n")
